@@ -2,7 +2,7 @@
 
 Discrete-time vessel simulator for the interview project. The program reads newline-delimited JSON commands from `stdin` and writes one JSON response per command to `stdout`.
 
-This implementation currently covers the base project and Follow-On 1 cargo/dock operations:
+This implementation currently covers the base project, Follow-On 1 cargo/dock operations, and Follow-On 2 historical state queries:
 
 - `init`
 - `tick`
@@ -13,8 +13,7 @@ This implementation currently covers the base project and Follow-On 1 cargo/dock
 - `load`
 - `unload`
 - `swap`
-
-Follow-On 2 historical queries are not implemented yet.
+- `get_state_at`
 
 ## Setup
 
@@ -44,6 +43,12 @@ Run the cargo/dock flow:
 
 ```sh
 cargo run --quiet < examples/follow_on_1.input.jsonl
+```
+
+Run the historical query flow:
+
+```sh
+cargo run --quiet < examples/follow_on_2.input.jsonl
 ```
 
 You can also type commands manually:

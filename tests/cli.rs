@@ -63,3 +63,11 @@ fn follow_on_1_fixture_matches_expected_json() {
 
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn follow_on_2_fixture_matches_expected_json() {
+    let actual = run_fixture(include_str!("../examples/follow_on_2.input.jsonl"));
+    let expected = expected_fixture(include_str!("../examples/follow_on_2.expected.jsonl"));
+
+    assert_eq!(actual, expected);
+}

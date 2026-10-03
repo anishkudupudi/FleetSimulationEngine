@@ -145,6 +145,7 @@ pub struct Engine {
     travel_times: Option<Vec<Vec<u64>>>,
     dock_throughput: Option<Vec<u64>>,
     pending_dock_operations: Option<Vec<u64>>,
+    history: Vec<WorldState>,
     // Committed state is the last tick-boundary snapshot; planned state includes
     // valid commands issued since that tick.
     committed: Option<WorldState>,
@@ -174,6 +175,7 @@ impl Engine {
             Command::Tick(params) => self.tick(params),
             Command::SetDestination(params) => self.set_destination(params),
             Command::GetState(_) => self.get_state(),
+            Command::GetStateAt(params) => self.get_state_at(params),
             Command::Dock(params) => self.dock(params),
             Command::Undock(params) => self.undock(params),
             Command::Load(params) => self.load(params),
@@ -244,6 +246,7 @@ impl Engine {
         self.pending_dock_operations = Some(vec![0; location_count]);
         self.committed = Some(state.clone());
         self.planned = Some(state.clone());
+        self.history = vec![state.clone()];
         Ok(state)
     }
 
@@ -289,6 +292,7 @@ impl Engine {
         self.committed = Some(next.clone());
         self.planned = Some(next.clone());
         self.pending_dock_operations = Some(vec![0; location_count]);
+        self.history.push(next.clone());
         Ok(next)
     }
 
@@ -451,6 +455,33 @@ impl Engine {
             .planned
             .clone()
             .expect("planned state exists after initialization"))
+    }
+
+    fn get_state_at(&self, params: GetStateAtParams) -> Result<WorldState, String> {
+        self.ensure_initialized()?;
+
+        let current_tick = self
+            .committed
+            .as_ref()
+            .expect("committed state exists after initialization")
+            .tick;
+
+        if params.tick > current_tick {
+            return Err(format!(
+                "tick {} is in the future (current tick: {})",
+                params.tick, current_tick
+            ));
+        }
+
+        self.history
+            .get(params.tick as usize)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "tick {} is in the future (current tick: {})",
+                    params.tick, current_tick
+                )
+            })
     }
 
     fn ensure_initialized(&self) -> Result<(), String> {
@@ -712,6 +743,7 @@ impl RawCommand {
             "tick" => parse_params(self.parameters).map(Command::Tick),
             "set_destination" => parse_params(self.parameters).map(Command::SetDestination),
             "get_state" => parse_params(self.parameters).map(Command::GetState),
+            "get_state_at" => parse_params(self.parameters).map(Command::GetStateAt),
             "dock" => parse_params(self.parameters).map(Command::Dock),
             "undock" => parse_params(self.parameters).map(Command::Undock),
             "load" => parse_params(self.parameters).map(Command::Load),
@@ -735,6 +767,7 @@ pub enum Command {
     Tick(TickParams),
     SetDestination(SetDestinationParams),
     GetState(EmptyParams),
+    GetStateAt(GetStateAtParams),
     Dock(VesselParams),
     Undock(VesselParams),
     Load(TransferParams),
@@ -777,6 +810,11 @@ pub struct CargoManifestEntry {
 pub struct SetDestinationParams {
     pub vessel_id: String,
     pub destination: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetStateAtParams {
+    pub tick: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1271,6 +1309,135 @@ mod tests {
 
         assert_eq!(state.tick, 1);
         assert_eq!(state.docks.get(&0).unwrap().cargo, cargo(3, 2));
+    }
+
+    #[test]
+    fn get_state_at_returns_initial_committed_state_after_later_plans() {
+        let mut engine = Engine::new();
+        init(&mut engine);
+        ok_payload(engine.handle_line(
+            r#"{"command":"set_destination","parameters":{"vessel_id":"v1","destination":1}}"#,
+        ));
+
+        let historical =
+            ok_payload(engine.handle_line(r#"{"command":"get_state_at","parameters":{"tick":0}}"#));
+        let planned = ok_payload(engine.handle_line(r#"{"command":"get_state","parameters":{}}"#));
+
+        assert_eq!(
+            historical.vessels.get("v1"),
+            Some(&VesselState::Idle {
+                location: 0,
+                cargo: CargoInventory::default()
+            })
+        );
+        assert!(matches!(
+            planned.vessels.get("v1"),
+            Some(VesselState::Transit { .. })
+        ));
+    }
+
+    #[test]
+    fn get_state_at_records_each_successful_tick() {
+        let mut engine = Engine::new();
+        init(&mut engine);
+        ok_payload(engine.handle_line(
+            r#"{"command":"set_destination","parameters":{"vessel_id":"v1","destination":1}}"#,
+        ));
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+
+        let tick_one =
+            ok_payload(engine.handle_line(r#"{"command":"get_state_at","parameters":{"tick":1}}"#));
+        let tick_two =
+            ok_payload(engine.handle_line(r#"{"command":"get_state_at","parameters":{"tick":2}}"#));
+
+        assert_eq!(tick_one.tick, 1);
+        assert_eq!(tick_two.tick, 2);
+        assert!(matches!(
+            tick_one.vessels.get("v1"),
+            Some(VesselState::Transit {
+                arrives_at_tick: 4,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn get_state_at_ignores_pending_non_tick_changes() {
+        let mut engine = Engine::new();
+        init(&mut engine);
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+        ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
+
+        let historical =
+            ok_payload(engine.handle_line(r#"{"command":"get_state_at","parameters":{"tick":1}}"#));
+        let planned = ok_payload(engine.handle_line(r#"{"command":"get_state","parameters":{}}"#));
+
+        assert!(matches!(
+            historical.vessels.get("v1"),
+            Some(VesselState::Idle { .. })
+        ));
+        assert!(matches!(
+            planned.vessels.get("v1"),
+            Some(VesselState::Docked { .. })
+        ));
+    }
+
+    #[test]
+    fn get_state_at_current_tick_returns_latest_committed_state() {
+        let mut engine = Engine::new();
+        init(&mut engine);
+        ok_payload(engine.handle_line(
+            r#"{"command":"tick","parameters":{"cargo_manifest":[{"location":0,"destination":2,"quantity":1}]}}"#,
+        ));
+
+        let historical =
+            ok_payload(engine.handle_line(r#"{"command":"get_state_at","parameters":{"tick":1}}"#));
+
+        assert_eq!(historical.tick, 1);
+        assert_eq!(historical.docks.get(&0).unwrap().cargo, cargo(1, 2));
+    }
+
+    #[test]
+    fn get_state_at_future_tick_returns_error() {
+        let mut engine = Engine::new();
+        init(&mut engine);
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+
+        let message = error_message(
+            engine.handle_line(r#"{"command":"get_state_at","parameters":{"tick":99}}"#),
+        );
+
+        assert_eq!(message, "tick 99 is in the future (current tick: 1)");
+    }
+
+    #[test]
+    fn get_state_at_negative_tick_is_parameter_error() {
+        let mut engine = Engine::new();
+        init(&mut engine);
+
+        let message = error_message(
+            engine.handle_line(r#"{"command":"get_state_at","parameters":{"tick":-1}}"#),
+        );
+
+        assert!(message.contains("invalid parameters"));
+    }
+
+    #[test]
+    fn get_state_at_does_not_mutate_planned_state() {
+        let mut engine = Engine::new();
+        init(&mut engine);
+        ok_payload(engine.handle_line(
+            r#"{"command":"set_destination","parameters":{"vessel_id":"v1","destination":1}}"#,
+        ));
+
+        ok_payload(engine.handle_line(r#"{"command":"get_state_at","parameters":{"tick":0}}"#));
+        let planned = ok_payload(engine.handle_line(r#"{"command":"get_state","parameters":{}}"#));
+
+        assert!(matches!(
+            planned.vessels.get("v1"),
+            Some(VesselState::Transit { .. })
+        ));
     }
 
     #[test]
