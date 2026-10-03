@@ -1,0 +1,8 @@
+{"status":"error","payload":{"message":"engine is not initialized"}}
+{"status":"error","payload":{"message":"duplicate vessel id v1"}}
+{"status":"ok","payload":{"tick":0,"vessels":{"v1":{"state":"idle","location":0}}}}
+{"status":"error","payload":{"message":"engine is already initialized"}}
+{"status":"error","payload":{"message":"destination 99 is out of range"}}
+{"status":"ok","payload":{"tick":0,"vessels":{"v1":{"state":"transit","from":0,"to":1,"arrives_at_tick":4}}}}
+{"status":"ok","payload":{"tick":0,"vessels":{"v1":{"state":"idle","location":0}}}}
+{"status":"ok","payload":{"tick":0,"vessels":{"v1":{"state":"idle","location":0}}}}
