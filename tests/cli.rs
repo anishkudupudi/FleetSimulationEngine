@@ -55,3 +55,11 @@ fn edge_case_fixture_matches_expected_json() {
 
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn follow_on_1_fixture_matches_expected_json() {
+    let actual = run_fixture(include_str!("../examples/follow_on_1.input.jsonl"));
+    let expected = expected_fixture(include_str!("../examples/follow_on_1.expected.jsonl"));
+
+    assert_eq!(actual, expected);
+}

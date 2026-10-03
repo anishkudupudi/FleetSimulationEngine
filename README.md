@@ -1,15 +1,20 @@
 # Fleet Simulation Engine
 
-Discrete-time vessel simulator for the base interview project. The program reads newline-delimited JSON commands from `stdin` and writes one JSON response per command to `stdout`.
+Discrete-time vessel simulator for the interview project. The program reads newline-delimited JSON commands from `stdin` and writes one JSON response per command to `stdout`.
 
-This implementation currently covers the base project only:
+This implementation currently covers the base project and Follow-On 1 cargo/dock operations:
 
 - `init`
 - `tick`
 - `set_destination`
 - `get_state`
+- `dock`
+- `undock`
+- `load`
+- `unload`
+- `swap`
 
-Follow-on cargo/dock operations and historical queries are intentionally not implemented yet.
+Follow-On 2 historical queries are not implemented yet.
 
 ## Setup
 
@@ -35,6 +40,12 @@ The output should match:
 cat examples/base.expected.jsonl
 ```
 
+Run the cargo/dock flow:
+
+```sh
+cargo run --quiet < examples/follow_on_1.input.jsonl
+```
+
 You can also type commands manually:
 
 ```sh
@@ -48,4 +59,3 @@ cargo test
 ```
 
 Tests cover the simulator library and the CLI stdin/stdout behavior.
-
