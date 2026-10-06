@@ -1,6 +1,6 @@
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "payload", rename_all = "lowercase")]
@@ -29,8 +29,8 @@ pub struct ErrorPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldState {
     pub tick: u64,
-    pub vessels: BTreeMap<String, VesselState>,
-    pub docks: BTreeMap<usize, DockState>,
+    pub vessels: HashMap<String, VesselState>,
+    pub docks: HashMap<usize, DockState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ pub struct DockState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CargoInventory {
-    by_destination: BTreeMap<usize, u64>,
+    by_destination: HashMap<usize, u64>,
 }
 
 impl CargoInventory {
@@ -52,13 +52,23 @@ impl CargoInventory {
         *self.by_destination.entry(destination).or_insert(0) += quantity;
     }
 
-    fn remove_one(&mut self, destination: usize) -> Result<(), String> {
+    fn remove(&mut self, destination: usize, amount: u64) -> Result<(), String> {
+        if amount == 0 {
+            return Ok(());
+        }
+
         let quantity = self
             .by_destination
             .get_mut(&destination)
             .ok_or_else(|| format!("cargo with destination {destination} is not available"))?;
 
-        *quantity -= 1;
+        if *quantity < amount {
+            return Err(format!(
+                "cargo with destination {destination} is not available"
+            ));
+        }
+
+        *quantity -= amount;
         if *quantity == 0 {
             self.by_destination.remove(&destination);
         }
@@ -72,8 +82,11 @@ impl Serialize for CargoInventory {
     where
         S: Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(self.by_destination.len()))?;
-        for (destination, quantity) in &self.by_destination {
+        let mut entries: Vec<_> = self.by_destination.iter().collect();
+        entries.sort_by_key(|(destination, _)| **destination);
+
+        let mut seq = serializer.serialize_seq(Some(entries.len()))?;
+        for (destination, quantity) in entries {
             seq.serialize_element(&CargoEntry {
                 destination: *destination,
                 quantity: *quantity,
@@ -104,39 +117,31 @@ pub struct CargoEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VesselState {
+    #[serde(flatten)]
+    pub status: VesselStatus,
+    pub cargo: CargoInventory,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum VesselState {
+pub enum VesselStatus {
     Idle {
         location: usize,
-        cargo: CargoInventory,
     },
     Docked {
         location: usize,
-        cargo: CargoInventory,
     },
     Transit {
         from: usize,
         to: usize,
         arrives_at_tick: u64,
-        cargo: CargoInventory,
     },
 }
 
 impl VesselState {
-    fn cargo(&self) -> &CargoInventory {
-        match self {
-            Self::Idle { cargo, .. } | Self::Docked { cargo, .. } | Self::Transit { cargo, .. } => {
-                cargo
-            }
-        }
-    }
-
     fn cargo_mut(&mut self) -> &mut CargoInventory {
-        match self {
-            Self::Idle { cargo, .. } | Self::Docked { cargo, .. } | Self::Transit { cargo, .. } => {
-                cargo
-            }
-        }
+        &mut self.cargo
     }
 }
 
@@ -204,7 +209,7 @@ impl Engine {
         }
 
         let location_count = params.travel_times.len();
-        let mut vessels = BTreeMap::new();
+        let mut vessels = HashMap::new();
 
         for vessel in params.vessels {
             if vessel.id.is_empty() {
@@ -221,8 +226,10 @@ impl Engine {
             if vessels
                 .insert(
                     vessel.id.clone(),
-                    VesselState::Idle {
-                        location: vessel.location,
+                    VesselState {
+                        status: VesselStatus::Idle {
+                            location: vessel.location,
+                        },
                         cargo: CargoInventory::default(),
                     },
                 )
@@ -262,24 +269,24 @@ impl Engine {
             .planned
             .clone()
             .expect("planned state exists after initialization");
+
         next.tick = next
             .tick
             .checked_add(1)
             .ok_or_else(|| "tick overflow".to_string())?;
 
         for vessel in next.vessels.values_mut() {
-            let arrival = match vessel {
-                VesselState::Transit {
+            let arrival = match &vessel.status {
+                VesselStatus::Transit {
                     to,
                     arrives_at_tick,
-                    cargo,
                     ..
-                } if *arrives_at_tick <= next.tick => Some((*to, cargo.clone())),
+                } if *arrives_at_tick <= next.tick => Some(*to),
                 _ => None,
             };
 
-            if let Some((location, cargo)) = arrival {
-                *vessel = VesselState::Idle { location, cargo };
+            if let Some(location) = arrival {
+                vessel.status = VesselStatus::Idle { location };
             }
         }
 
@@ -317,16 +324,17 @@ impl Engine {
             .expect("committed state exists after initialization");
 
         let current_location = match committed.vessels.get(&params.vessel_id) {
-            Some(VesselState::Idle { location, .. }) => *location,
+            Some(VesselState {
+                status: VesselStatus::Idle { location },
+                ..
+            }) => *location,
             Some(_) => return Err(format!("vessel {} is not idle", params.vessel_id)),
             None => return Err(format!("unknown vessel {}", params.vessel_id)),
         };
 
-        let planned_cargo = self.planned_vessel_cargo(&params.vessel_id)?;
-        let planned_state = if params.destination == current_location {
-            VesselState::Idle {
+        let planned_status = if params.destination == current_location {
+            VesselStatus::Idle {
                 location: current_location,
-                cargo: planned_cargo,
             }
         } else {
             let travel_time = travel_times[current_location][params.destination];
@@ -335,11 +343,10 @@ impl Engine {
                 .checked_add(travel_time)
                 .ok_or_else(|| format!("travel time overflow for vessel {}", params.vessel_id))?;
 
-            VesselState::Transit {
+            VesselStatus::Transit {
                 from: current_location,
                 to: params.destination,
                 arrives_at_tick,
-                cargo: planned_cargo,
             }
         };
 
@@ -347,7 +354,11 @@ impl Engine {
             .planned
             .as_mut()
             .expect("planned state exists after initialization");
-        planned.vessels.insert(params.vessel_id, planned_state);
+        planned
+            .vessels
+            .get_mut(&params.vessel_id)
+            .expect("planned vessel exists after validation")
+            .status = planned_status;
         Ok(planned.clone())
     }
 
@@ -355,20 +366,27 @@ impl Engine {
         self.ensure_initialized()?;
 
         let location = match self.committed_vessel(&params.vessel_id)? {
-            VesselState::Idle { location, .. } | VesselState::Docked { location, .. } => *location,
-            VesselState::Transit { .. } => {
+            VesselState {
+                status: VesselStatus::Idle { location } | VesselStatus::Docked { location },
+                ..
+            } => *location,
+            VesselState {
+                status: VesselStatus::Transit { .. },
+                ..
+            } => {
                 return Err(format!("vessel {} is not idle", params.vessel_id));
             }
         };
 
-        let cargo = self.planned_vessel_cargo(&params.vessel_id)?;
         let planned = self
             .planned
             .as_mut()
             .expect("planned state exists after initialization");
         planned
             .vessels
-            .insert(params.vessel_id, VesselState::Docked { location, cargo });
+            .get_mut(&params.vessel_id)
+            .expect("planned vessel exists after validation")
+            .status = VesselStatus::Docked { location };
         Ok(planned.clone())
     }
 
@@ -376,41 +394,60 @@ impl Engine {
         self.ensure_initialized()?;
 
         let location = match self.committed_vessel(&params.vessel_id)? {
-            VesselState::Docked { location, .. } => *location,
-            VesselState::Idle { .. } => match self
+            VesselState {
+                status: VesselStatus::Docked { location },
+                ..
+            } => *location,
+            VesselState {
+                status: VesselStatus::Idle { .. },
+                ..
+            } => match self
                 .planned
                 .as_ref()
                 .expect("planned state exists after initialization")
                 .vessels
                 .get(&params.vessel_id)
             {
-                Some(VesselState::Docked { location, .. }) => *location,
+                Some(VesselState {
+                    status: VesselStatus::Docked { location },
+                    ..
+                }) => *location,
                 _ => return Err(format!("vessel {} is not docked", params.vessel_id)),
             },
-            VesselState::Transit { .. } => {
+            VesselState {
+                status: VesselStatus::Transit { .. },
+                ..
+            } => {
                 return Err(format!("vessel {} is not docked", params.vessel_id));
             }
         };
 
-        let cargo = self.planned_vessel_cargo(&params.vessel_id)?;
         let planned = self
             .planned
             .as_mut()
             .expect("planned state exists after initialization");
         planned
             .vessels
-            .insert(params.vessel_id, VesselState::Idle { location, cargo });
+            .get_mut(&params.vessel_id)
+            .expect("planned vessel exists after validation")
+            .status = VesselStatus::Idle { location };
         Ok(planned.clone())
     }
 
     fn load(&mut self, params: TransferParams) -> Result<WorldState, String> {
         self.ensure_initialized()?;
+        validate_transfer_amount(params.amount)?;
         let location = self.validate_cargo_command(&params.vessel_id)?;
-        self.reserve_dock_operation(location)?;
+        self.reserve_dock_operation(location, params.amount)?;
 
-        let result = self.apply_load(&params.vessel_id, location, params.destination);
+        let result = self.apply_load(
+            &params.vessel_id,
+            location,
+            params.destination,
+            params.amount,
+        );
         if result.is_err() {
-            self.release_dock_operation(location);
+            self.release_dock_operation(location, params.amount);
         }
 
         result
@@ -418,12 +455,18 @@ impl Engine {
 
     fn unload(&mut self, params: TransferParams) -> Result<WorldState, String> {
         self.ensure_initialized()?;
+        validate_transfer_amount(params.amount)?;
         let location = self.validate_cargo_command(&params.vessel_id)?;
-        self.reserve_dock_operation(location)?;
+        self.reserve_dock_operation(location, params.amount)?;
 
-        let result = self.apply_unload(&params.vessel_id, location, params.destination);
+        let result = self.apply_unload(
+            &params.vessel_id,
+            location,
+            params.destination,
+            params.amount,
+        );
         if result.is_err() {
-            self.release_dock_operation(location);
+            self.release_dock_operation(location, params.amount);
         }
 
         result
@@ -431,19 +474,30 @@ impl Engine {
 
     fn swap(&mut self, params: SwapParams) -> Result<WorldState, String> {
         self.ensure_initialized()?;
+        validate_transfer_amount(params.amount)?;
         let location = self.validate_cargo_command(&params.vessel_id)?;
-        self.reserve_dock_operation(location)?;
+        self.reserve_dock_operation(location, params.amount)?;
 
         let before = self.planned.clone();
-        let load_result = self.apply_load(&params.vessel_id, location, params.load_destination);
+        let load_result = self.apply_load(
+            &params.vessel_id,
+            location,
+            params.load_destination,
+            params.amount,
+        );
         let result = match load_result {
-            Ok(_) => self.apply_unload(&params.vessel_id, location, params.unload_destination),
+            Ok(_) => self.apply_unload(
+                &params.vessel_id,
+                location,
+                params.unload_destination,
+                params.amount,
+            ),
             Err(err) => Err(err),
         };
 
         if result.is_err() {
             self.planned = before;
-            self.release_dock_operation(location);
+            self.release_dock_operation(location, params.amount);
         }
 
         result
@@ -508,19 +562,12 @@ impl Engine {
             .ok_or_else(|| format!("unknown vessel {vessel_id}"))
     }
 
-    fn planned_vessel_cargo(&self, vessel_id: &str) -> Result<CargoInventory, String> {
-        self.planned
-            .as_ref()
-            .expect("planned state exists after initialization")
-            .vessels
-            .get(vessel_id)
-            .map(|vessel| vessel.cargo().clone())
-            .ok_or_else(|| format!("unknown vessel {vessel_id}"))
-    }
-
     fn validate_cargo_command(&self, vessel_id: &str) -> Result<usize, String> {
         let committed_location = match self.committed_vessel(vessel_id)? {
-            VesselState::Docked { location, .. } => *location,
+            VesselState {
+                status: VesselStatus::Docked { location },
+                ..
+            } => *location,
             _ => return Err(format!("vessel {vessel_id} is not docked")),
         };
 
@@ -531,15 +578,16 @@ impl Engine {
             .vessels
             .get(vessel_id)
         {
-            Some(VesselState::Docked { location, .. }) if *location == committed_location => {
-                Ok(committed_location)
-            }
+            Some(VesselState {
+                status: VesselStatus::Docked { location },
+                ..
+            }) if *location == committed_location => Ok(committed_location),
             Some(_) => Err(format!("vessel {vessel_id} is not docked")),
             None => Err(format!("unknown vessel {vessel_id}")),
         }
     }
 
-    fn reserve_dock_operation(&mut self, location: usize) -> Result<(), String> {
+    fn reserve_dock_operation(&mut self, location: usize, amount: u64) -> Result<(), String> {
         let limit = self
             .dock_throughput
             .as_ref()
@@ -548,7 +596,9 @@ impl Engine {
             .pending_dock_operations
             .as_mut()
             .expect("dock operation counters exist after initialization");
-        let next_count = operations[location] + 1;
+        let next_count = operations[location]
+            .checked_add(amount)
+            .ok_or_else(|| format!("transfer operation count overflow at location {location}"))?;
 
         if next_count > limit {
             return Err(format!(
@@ -560,12 +610,12 @@ impl Engine {
         Ok(())
     }
 
-    fn release_dock_operation(&mut self, location: usize) {
+    fn release_dock_operation(&mut self, location: usize, amount: u64) {
         let operations = self
             .pending_dock_operations
             .as_mut()
             .expect("dock operation counters exist after initialization");
-        operations[location] -= 1;
+        operations[location] -= amount;
     }
 
     fn apply_load(
@@ -573,6 +623,7 @@ impl Engine {
         vessel_id: &str,
         location: usize,
         destination: usize,
+        amount: u64,
     ) -> Result<WorldState, String> {
         if destination >= self.location_count() {
             return Err(format!("destination {destination} is out of range"));
@@ -587,13 +638,13 @@ impl Engine {
             .get_mut(&location)
             .expect("dock exists for valid location")
             .cargo
-            .remove_one(destination)?;
+            .remove(destination, amount)?;
         planned
             .vessels
             .get_mut(vessel_id)
             .expect("planned vessel exists after validation")
             .cargo_mut()
-            .add(destination, 1);
+            .add(destination, amount);
 
         Ok(planned.clone())
     }
@@ -603,6 +654,7 @@ impl Engine {
         vessel_id: &str,
         location: usize,
         destination: usize,
+        amount: u64,
     ) -> Result<WorldState, String> {
         if destination >= self.location_count() {
             return Err(format!("destination {destination} is out of range"));
@@ -617,7 +669,7 @@ impl Engine {
             .get_mut(vessel_id)
             .expect("planned vessel exists after validation")
             .cargo_mut()
-            .remove_one(destination)?;
+            .remove(destination, amount)?;
 
         if destination != location {
             planned
@@ -625,14 +677,14 @@ impl Engine {
                 .get_mut(&location)
                 .expect("dock exists for valid location")
                 .cargo
-                .add(destination, 1);
+                .add(destination, amount);
         }
 
         Ok(planned.clone())
     }
 }
 
-fn empty_docks(location_count: usize) -> BTreeMap<usize, DockState> {
+fn empty_docks(location_count: usize) -> HashMap<usize, DockState> {
     (0..location_count)
         .map(|location| {
             (
@@ -646,7 +698,7 @@ fn empty_docks(location_count: usize) -> BTreeMap<usize, DockState> {
 }
 
 fn apply_manifest(
-    docks: &mut BTreeMap<usize, DockState>,
+    docks: &mut HashMap<usize, DockState>,
     manifest: Option<&[CargoManifestEntry]>,
     location_count: usize,
 ) -> Result<(), String> {
@@ -699,6 +751,14 @@ fn validate_dock_throughput(dock_throughput: &[u64], location_count: usize) -> R
     }
 
     Ok(())
+}
+
+fn validate_transfer_amount(amount: u64) -> Result<(), String> {
+    if amount == 0 {
+        Err("transfer amount must be positive".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_travel_times(travel_times: &[Vec<u64>]) -> Result<(), String> {
@@ -759,6 +819,10 @@ where
     T: for<'de> Deserialize<'de>,
 {
     serde_json::from_value(value).map_err(|err| format!("invalid parameters: {err}"))
+}
+
+fn default_transfer_amount() -> u64 {
+    1
 }
 
 #[derive(Debug)]
@@ -826,6 +890,8 @@ pub struct VesselParams {
 pub struct TransferParams {
     pub vessel_id: String,
     pub destination: usize,
+    #[serde(default = "default_transfer_amount")]
+    pub amount: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -833,6 +899,8 @@ pub struct SwapParams {
     pub vessel_id: String,
     pub load_destination: usize,
     pub unload_destination: usize,
+    #[serde(default = "default_transfer_amount")]
+    pub amount: u64,
 }
 
 #[cfg(test)]
@@ -865,6 +933,10 @@ mod tests {
         inventory
     }
 
+    fn vessel(status: VesselStatus, cargo: CargoInventory) -> VesselState {
+        VesselState { status, cargo }
+    }
+
     #[test]
     fn init_creates_tick_zero_world_with_docks_and_empty_cargo() {
         let mut engine = Engine::new();
@@ -873,10 +945,10 @@ mod tests {
         assert_eq!(state.tick, 0);
         assert_eq!(
             state.vessels.get("v1"),
-            Some(&VesselState::Idle {
-                location: 0,
-                cargo: CargoInventory::default()
-            })
+            Some(&vessel(
+                VesselStatus::Idle { location: 0 },
+                CargoInventory::default()
+            ))
         );
         assert_eq!(state.docks.len(), 3);
         assert_eq!(
@@ -1025,12 +1097,14 @@ mod tests {
 
         assert_eq!(
             state.vessels.get("v1"),
-            Some(&VesselState::Transit {
-                from: 0,
-                to: 1,
-                arrives_at_tick: 4,
-                cargo: CargoInventory::default()
-            })
+            Some(&vessel(
+                VesselStatus::Transit {
+                    from: 0,
+                    to: 1,
+                    arrives_at_tick: 4
+                },
+                CargoInventory::default()
+            ))
         );
     }
 
@@ -1065,10 +1139,10 @@ mod tests {
 
         assert_eq!(
             state.vessels.get("v1"),
-            Some(&VesselState::Idle {
-                location: 0,
-                cargo: CargoInventory::default()
-            })
+            Some(&vessel(
+                VesselStatus::Idle { location: 0 },
+                CargoInventory::default()
+            ))
         );
     }
 
@@ -1085,17 +1159,20 @@ mod tests {
             let state = ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
             assert!(matches!(
                 state.vessels.get("v1"),
-                Some(VesselState::Transit { .. })
+                Some(VesselState {
+                    status: VesselStatus::Transit { .. },
+                    ..
+                })
             ));
         }
 
         let state = ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
         assert_eq!(
             state.vessels.get("v1"),
-            Some(&VesselState::Idle {
-                location: 1,
-                cargo: CargoInventory::default()
-            })
+            Some(&vessel(
+                VesselStatus::Idle { location: 1 },
+                CargoInventory::default()
+            ))
         );
     }
 
@@ -1108,7 +1185,10 @@ mod tests {
             ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
         assert!(matches!(
             docked.vessels.get("v1"),
-            Some(VesselState::Docked { .. })
+            Some(VesselState {
+                status: VesselStatus::Docked { .. },
+                ..
+            })
         ));
 
         let transit = ok_payload(engine.handle_line(
@@ -1116,14 +1196,20 @@ mod tests {
         ));
         assert!(matches!(
             transit.vessels.get("v1"),
-            Some(VesselState::Transit { .. })
+            Some(VesselState {
+                status: VesselStatus::Transit { .. },
+                ..
+            })
         ));
 
         let docked =
             ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
         assert!(matches!(
             docked.vessels.get("v1"),
-            Some(VesselState::Docked { .. })
+            Some(VesselState {
+                status: VesselStatus::Docked { .. },
+                ..
+            })
         ));
     }
 
@@ -1138,7 +1224,10 @@ mod tests {
         );
         assert!(matches!(
             state.vessels.get("v1"),
-            Some(VesselState::Idle { .. })
+            Some(VesselState {
+                status: VesselStatus::Idle { .. },
+                ..
+            })
         ));
 
         ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
@@ -1149,7 +1238,10 @@ mod tests {
             ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
         assert!(matches!(
             state.vessels.get("v1"),
-            Some(VesselState::Docked { .. })
+            Some(VesselState {
+                status: VesselStatus::Docked { .. },
+                ..
+            })
         ));
     }
 
@@ -1172,7 +1264,10 @@ mod tests {
         );
         assert!(matches!(
             state.vessels.get("v1"),
-            Some(VesselState::Idle { .. })
+            Some(VesselState {
+                status: VesselStatus::Idle { .. },
+                ..
+            })
         ));
 
         let message =
@@ -1211,7 +1306,134 @@ mod tests {
             r#"{"command":"swap","parameters":{"vessel_id":"v1","load_destination":1,"unload_destination":1}}"#,
         ));
         assert_eq!(state.docks.get(&0).unwrap().cargo, cargo(1, 1));
-        assert_eq!(state.vessels.get("v1").unwrap().cargo(), &cargo(1, 1));
+        assert_eq!(state.vessels.get("v1").unwrap().cargo, cargo(1, 1));
+    }
+
+    #[test]
+    fn load_amount_moves_multiple_units_and_counts_throughput() {
+        let mut engine = Engine::new();
+        ok_payload(engine.handle_line(
+            r#"{"command":"init","parameters":{"travel_times":[[0,1],[1,0]],"dock_throughput":[2,2],"vessels":[{"id":"v1","location":0}],"cargo_manifest":[{"location":0,"destination":1,"quantity":3}]}}"#,
+        ));
+        ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+
+        let state = ok_payload(engine.handle_line(
+            r#"{"command":"load","parameters":{"vessel_id":"v1","destination":1,"amount":2}}"#,
+        ));
+        assert_eq!(state.docks.get(&0).unwrap().cargo, cargo(1, 1));
+        assert_eq!(state.vessels.get("v1").unwrap().cargo, cargo(2, 1));
+
+        let message =
+            error_message(engine.handle_line(
+                r#"{"command":"load","parameters":{"vessel_id":"v1","destination":1}}"#,
+            ));
+        assert_eq!(
+            message,
+            "transfer of 3 operations exceeds dock throughput of 2 at location 0"
+        );
+    }
+
+    #[test]
+    fn unload_amount_moves_multiple_units_back_to_dock() {
+        let mut engine = Engine::new();
+        ok_payload(engine.handle_line(
+            r#"{"command":"init","parameters":{"travel_times":[[0,1],[1,0]],"dock_throughput":[4,4],"vessels":[{"id":"v1","location":0}],"cargo_manifest":[{"location":0,"destination":1,"quantity":2}]}}"#,
+        ));
+        ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+        ok_payload(engine.handle_line(
+            r#"{"command":"load","parameters":{"vessel_id":"v1","destination":1,"amount":2}}"#,
+        ));
+
+        let state = ok_payload(engine.handle_line(
+            r#"{"command":"unload","parameters":{"vessel_id":"v1","destination":1,"amount":2}}"#,
+        ));
+        assert_eq!(state.docks.get(&0).unwrap().cargo, cargo(2, 1));
+        assert_eq!(
+            state.vessels.get("v1").unwrap().cargo,
+            CargoInventory::default()
+        );
+    }
+
+    #[test]
+    fn unload_amount_delivers_matching_destination_at_current_location() {
+        let mut engine = Engine::new();
+        ok_payload(engine.handle_line(
+            r#"{"command":"init","parameters":{"travel_times":[[0,1],[1,0]],"dock_throughput":[4,4],"vessels":[{"id":"v1","location":0}],"cargo_manifest":[{"location":0,"destination":0,"quantity":2}]}}"#,
+        ));
+        ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+        ok_payload(engine.handle_line(
+            r#"{"command":"load","parameters":{"vessel_id":"v1","destination":0,"amount":2}}"#,
+        ));
+
+        let state = ok_payload(engine.handle_line(
+            r#"{"command":"unload","parameters":{"vessel_id":"v1","destination":0,"amount":2}}"#,
+        ));
+        assert_eq!(
+            state.docks.get(&0).unwrap().cargo,
+            CargoInventory::default()
+        );
+        assert_eq!(
+            state.vessels.get("v1").unwrap().cargo,
+            CargoInventory::default()
+        );
+    }
+
+    #[test]
+    fn swap_amount_loads_and_unloads_multiple_units() {
+        let mut engine = Engine::new();
+        ok_payload(engine.handle_line(
+            r#"{"command":"init","parameters":{"travel_times":[[0,1,1],[1,0,1],[1,1,0]],"dock_throughput":[2,2,2],"vessels":[{"id":"v1","location":0}],"cargo_manifest":[{"location":0,"destination":1,"quantity":2},{"location":0,"destination":2,"quantity":2}]}}"#,
+        ));
+        ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+        ok_payload(engine.handle_line(
+            r#"{"command":"load","parameters":{"vessel_id":"v1","destination":2,"amount":2}}"#,
+        ));
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+
+        let state = ok_payload(engine.handle_line(
+            r#"{"command":"swap","parameters":{"vessel_id":"v1","load_destination":1,"unload_destination":2,"amount":2}}"#,
+        ));
+        assert_eq!(state.docks.get(&0).unwrap().cargo, cargo(2, 2));
+        assert_eq!(state.vessels.get("v1").unwrap().cargo, cargo(2, 1));
+    }
+
+    #[test]
+    fn amount_exceeding_available_cargo_leaves_state_and_throughput_unchanged() {
+        let mut engine = Engine::new();
+        ok_payload(engine.handle_line(
+            r#"{"command":"init","parameters":{"travel_times":[[0,1],[1,0]],"dock_throughput":[2,2],"vessels":[{"id":"v1","location":0}],"cargo_manifest":[{"location":0,"destination":1,"quantity":1}]}}"#,
+        ));
+        ok_payload(engine.handle_line(r#"{"command":"dock","parameters":{"vessel_id":"v1"}}"#));
+        ok_payload(engine.handle_line(r#"{"command":"tick","parameters":{}}"#));
+
+        let before = ok_payload(engine.handle_line(r#"{"command":"get_state","parameters":{}}"#));
+        let message = error_message(engine.handle_line(
+            r#"{"command":"load","parameters":{"vessel_id":"v1","destination":1,"amount":2}}"#,
+        ));
+        let after = ok_payload(engine.handle_line(r#"{"command":"get_state","parameters":{}}"#));
+        assert_eq!(message, "cargo with destination 1 is not available");
+        assert_eq!(before, after);
+
+        let state =
+            ok_payload(engine.handle_line(
+                r#"{"command":"load","parameters":{"vessel_id":"v1","destination":1}}"#,
+            ));
+        assert_eq!(state.vessels.get("v1").unwrap().cargo, cargo(1, 1));
+    }
+
+    #[test]
+    fn zero_transfer_amount_is_rejected() {
+        let mut engine = Engine::new();
+        init(&mut engine);
+
+        let message = error_message(engine.handle_line(
+            r#"{"command":"load","parameters":{"vessel_id":"v1","destination":1,"amount":0}}"#,
+        ));
+        assert_eq!(message, "transfer amount must be positive");
     }
 
     #[test]
@@ -1237,8 +1459,8 @@ mod tests {
             CargoInventory::default()
         );
         assert_eq!(
-            state.vessels.get("v1").unwrap().cargo(),
-            &CargoInventory::default()
+            state.vessels.get("v1").unwrap().cargo,
+            CargoInventory::default()
         );
     }
 
@@ -1270,7 +1492,7 @@ mod tests {
             ok_payload(engine.handle_line(
                 r#"{"command":"load","parameters":{"vessel_id":"v1","destination":1}}"#,
             ));
-        assert_eq!(state.vessels.get("v1").unwrap().cargo(), &cargo(2, 1));
+        assert_eq!(state.vessels.get("v1").unwrap().cargo, cargo(2, 1));
     }
 
     #[test]
@@ -1325,14 +1547,17 @@ mod tests {
 
         assert_eq!(
             historical.vessels.get("v1"),
-            Some(&VesselState::Idle {
-                location: 0,
-                cargo: CargoInventory::default()
-            })
+            Some(&vessel(
+                VesselStatus::Idle { location: 0 },
+                CargoInventory::default()
+            ))
         );
         assert!(matches!(
             planned.vessels.get("v1"),
-            Some(VesselState::Transit { .. })
+            Some(VesselState {
+                status: VesselStatus::Transit { .. },
+                ..
+            })
         ));
     }
 
@@ -1355,8 +1580,11 @@ mod tests {
         assert_eq!(tick_two.tick, 2);
         assert!(matches!(
             tick_one.vessels.get("v1"),
-            Some(VesselState::Transit {
-                arrives_at_tick: 4,
+            Some(VesselState {
+                status: VesselStatus::Transit {
+                    arrives_at_tick: 4,
+                    ..
+                },
                 ..
             })
         ));
@@ -1375,11 +1603,17 @@ mod tests {
 
         assert!(matches!(
             historical.vessels.get("v1"),
-            Some(VesselState::Idle { .. })
+            Some(VesselState {
+                status: VesselStatus::Idle { .. },
+                ..
+            })
         ));
         assert!(matches!(
             planned.vessels.get("v1"),
-            Some(VesselState::Docked { .. })
+            Some(VesselState {
+                status: VesselStatus::Docked { .. },
+                ..
+            })
         ));
     }
 
@@ -1436,7 +1670,10 @@ mod tests {
 
         assert!(matches!(
             planned.vessels.get("v1"),
-            Some(VesselState::Transit { .. })
+            Some(VesselState {
+                status: VesselStatus::Transit { .. },
+                ..
+            })
         ));
     }
 
