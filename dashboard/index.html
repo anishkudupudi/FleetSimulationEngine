@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fleet Simulation Dashboard</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Fleet Dashboard</h1>
+          <div class="status-line">
+            <span id="init-status">not initialized</span>
+            <span id="tick-status">tick -</span>
+            <span id="committed-status">live view</span>
+          </div>
+        </div>
+        <div class="mode-controls" role="group" aria-label="view mode">
+          <button class="mode-button active" data-mode="planned">Live</button>
+          <button class="mode-button" data-mode="committed">Committed</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="map-region" aria-label="world map">
+          <div class="section-heading">
+            <h2>World Map</h2>
+            <div class="legend">
+              <span><i class="legend-swatch committed"></i> committed</span>
+              <span><i class="legend-swatch planned"></i> planned change</span>
+              <span><i class="legend-swatch neutral"></i> empty</span>
+            </div>
+          </div>
+          <svg id="world-map" viewBox="0 0 900 520" role="img" aria-label="fleet world map"></svg>
+        </section>
+
+        <aside class="side-panel" aria-label="vessels and docks">
+          <div class="side-switcher">
+            <div class="side-tabs" role="tablist" aria-label="right panel view">
+              <button class="side-tab active" data-side-view="vessels" type="button">Vessels</button>
+              <button class="side-tab" data-side-view="docks" type="button">Docks</button>
+            </div>
+          </div>
+          <section class="side-section">
+            <div id="vessels-view"></div>
+            <div id="docks-view" class="hidden"></div>
+          </section>
+          <div class="cycle-controls">
+            <button id="cycle-prev-button" aria-label="previous item" title="Previous" type="button">&#8593;</button>
+            <button id="cycle-next-button" aria-label="next item" title="Next" type="button">&#8595;</button>
+          </div>
+        </aside>
+      </main>
+
+      <section class="terminal-panel" aria-label="timeline commands and responses">
+        <div class="terminal-resizer" id="terminal-resizer" title="Resize command panel"></div>
+        <div class="terminal-top">
+          <section class="timeline-module">
+            <div class="section-heading compact">
+              <h2>Timeline</h2>
+              <button id="live-button" type="button">Live</button>
+            </div>
+            <div class="timeline-row">
+              <input id="tick-slider" type="range" min="0" max="0" value="0">
+              <input id="tick-input" type="number" min="0" value="0">
+            </div>
+          </section>
+        </div>
+
+        <div class="terminal-grid">
+          <section class="command-builder">
+            <h2>Command Builder</h2>
+            <label class="command-selector">
+              Command
+              <select id="command-select">
+                <option value="init">init</option>
+                <option value="tick">tick</option>
+                <option value="set_destination">set_destination</option>
+                <option value="dock">dock</option>
+                <option value="undock">undock</option>
+                <option value="load">load</option>
+                <option value="unload">unload</option>
+                <option value="swap">swap</option>
+                <option value="get_state">get_state</option>
+                <option value="get_state_at">get_state_at</option>
+              </select>
+            </label>
+            <div class="form-grid">
+              <label class="command-field" data-fields="set_destination dock undock load unload swap">
+                Vessel
+                <input id="vessel-id-input" type="text" placeholder="v1">
+              </label>
+              <label class="command-field" data-fields="set_destination load unload">
+                Destination
+                <input id="destination-input" type="number" min="0" value="0">
+              </label>
+              <label class="command-field" data-fields="load unload swap">
+                Amount
+                <input id="amount-input" type="number" min="1" value="1">
+              </label>
+              <label class="command-field" data-fields="swap">
+                Load destination
+                <input id="load-destination-input" type="number" min="0" value="0">
+              </label>
+              <label class="command-field" data-fields="swap">
+                Unload destination
+                <input id="unload-destination-input" type="number" min="0" value="0">
+              </label>
+              <label class="command-field" data-fields="get_state_at">
+                Tick
+                <input id="builder-tick-input" type="number" min="0" value="0">
+              </label>
+              <div class="command-field wide-command-field manifest-fields" data-fields="tick">
+                <span>Cargo manifest (optional)</span>
+                <label>
+                  Location
+                  <input id="tick-manifest-location-input" type="number" min="0" value="0">
+                </label>
+                <label>
+                  Destination
+                  <input id="tick-manifest-destination-input" type="number" min="0" value="0">
+                </label>
+                <label>
+                  Quantity
+                  <input id="tick-manifest-quantity-input" type="number" min="0" value="0">
+                </label>
+              </div>
+            </div>
+            <label class="wide-label command-field" data-fields="init">
+              Init command or parameters
+              <textarea id="init-input" rows="5">{"travel_times":[[0,4,7],[4,0,3],[7,3,0]],"dock_throughput":[2,4,1],"vessels":[{"id":"v1","location":0},{"id":"v2","location":2}],"cargo_manifest":[{"location":0,"destination":2,"quantity":1},{"location":0,"destination":1,"quantity":1}]}</textarea>
+            </label>
+          </section>
+
+          <section class="json-module io-module">
+            <div class="io-tabs" role="tablist" aria-label="json tools">
+              <button class="io-tab active" data-io-tab="generated" type="button">Generated JSON</button>
+              <button class="io-tab" data-io-tab="raw" type="button">Raw JSONL</button>
+            </div>
+            <div id="generated-pane" class="io-pane">
+              <div class="section-heading compact">
+                <h2>Generated JSON</h2>
+                <button id="send-generated-button" class="primary" type="button">Send Generated</button>
+              </div>
+              <textarea id="generated-command" rows="8" readonly></textarea>
+            </div>
+            <div id="raw-pane" class="io-pane hidden">
+              <div class="section-heading compact">
+                <h2>Raw JSONL</h2>
+                <div class="button-row">
+                  <button id="run-command-button" type="button">Run Command</button>
+                  <button id="run-lines-button" type="button">Run All Lines</button>
+                </div>
+              </div>
+              <textarea id="raw-command" rows="8" spellcheck="false">{"command":"get_state","parameters":{}}</textarea>
+            </div>
+          </section>
+
+          <section class="log-module">
+            <h2>Response Log</h2>
+            <ol id="response-log" class="response-log"></ol>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
