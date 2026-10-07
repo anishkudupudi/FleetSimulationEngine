@@ -17,7 +17,7 @@
   --water: #0b3142;
   --water-light: #15516a;
   --shadow: 0 14px 36px rgba(0, 0, 0, 0.32);
-  --terminal-height: 310px;
+  --terminal-height: 92px;
   --side-panel-width: 360px;
 }
 
@@ -156,6 +156,10 @@ h2 {
   flex-wrap: wrap;
 }
 
+.side-tabs {
+  width: 100%;
+}
+
 .mode-button {
   padding: 0 10px;
 }
@@ -249,6 +253,10 @@ h2 {
   padding: 0 10px;
 }
 
+.command-builder-tab {
+  margin-left: auto;
+}
+
 .side-tab.active,
 .io-tab.active {
   border-color: #395d6c;
@@ -259,7 +267,7 @@ h2 {
 .terminal-panel {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto;
   min-height: 0;
   margin: 0 12px 12px;
   overflow: hidden;
@@ -289,7 +297,6 @@ h2 {
 
 .terminal-top {
   padding: 10px 12px 8px;
-  border-bottom: 1px solid var(--line);
   background: var(--surface-raised);
 }
 
@@ -310,9 +317,17 @@ h2 {
   min-height: 0;
 }
 
+#commands-view {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 4px;
+}
+
 .json-module,
 .log-module {
   grid-template-rows: auto minmax(0, 1fr);
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 .io-module {
@@ -321,9 +336,13 @@ h2 {
 
 .io-pane {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 9px;
   min-height: 0;
+}
+
+.action-row {
+  justify-content: flex-end;
 }
 
 .section-heading {
@@ -580,10 +599,15 @@ h2 {
   align-content: start;
   gap: 8px;
   min-height: 0;
+  max-height: 260px;
   overflow: auto;
   margin: 0;
   padding-left: 22px;
   font-size: 12px;
+}
+
+.log-search {
+  max-width: 150px;
 }
 
 .response-log li {
@@ -595,8 +619,19 @@ h2 {
 
 .response-log code {
   display: block;
+  margin-top: 6px;
   overflow-wrap: anywhere;
   font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.response-log .empty-log {
+  color: var(--muted);
+}
+
+.search-hit {
+  border-radius: 3px;
+  background: rgba(240, 179, 91, 0.28);
+  color: #ffe1aa;
 }
 
 .ok {

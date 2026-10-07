@@ -12,6 +12,7 @@ const state = {
   mapDrag: null,
   suppressMapClick: false,
   log: [],
+  nextLogIndex: 1,
 };
 
 const els = {
@@ -21,7 +22,9 @@ const els = {
   map: document.querySelector("#world-map"),
   vesselsView: document.querySelector("#vessels-view"),
   docksView: document.querySelector("#docks-view"),
+  commandsView: document.querySelector("#commands-view"),
   responseLog: document.querySelector("#response-log"),
+  responseLogSearch: document.querySelector("#response-log-search"),
   rawCommand: document.querySelector("#raw-command"),
   generatedCommand: document.querySelector("#generated-command"),
   commandSelect: document.querySelector("#command-select"),
@@ -123,6 +126,8 @@ els.commandSelect.addEventListener("change", () => {
   updateGeneratedCommand();
 });
 
+els.responseLogSearch.addEventListener("input", renderLog);
+
 els.tickSlider.addEventListener("input", () => {
   els.tickInput.value = els.tickSlider.value;
 });
@@ -138,10 +143,10 @@ els.tickInput.addEventListener("change", async () => {
 els.terminalResizer.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   const startY = event.clientY;
-  const startHeight = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--terminal-height"), 10) || 310;
+  const startHeight = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--terminal-height"), 10) || 92;
 
   const move = (moveEvent) => {
-    const nextHeight = Math.max(220, Math.min(window.innerHeight - 220, startHeight + startY - moveEvent.clientY));
+    const nextHeight = Math.max(76, Math.min(window.innerHeight - 220, startHeight + startY - moveEvent.clientY));
     document.documentElement.style.setProperty("--terminal-height", `${nextHeight}px`);
   };
   const stop = () => {
@@ -396,8 +401,9 @@ async function loadHistorical(tick) {
 }
 
 function appendLog(entry) {
-  state.log.unshift(entry);
-  state.log = state.log.slice(0, 50);
+  state.log.push({ ...entry, index: state.nextLogIndex });
+  state.nextLogIndex += 1;
+  state.log = state.log.slice(-100);
 }
 
 function render() {
@@ -728,19 +734,66 @@ function dockDetailsHtml(dock, committed, group) {
 }
 
 function renderLog() {
-  els.responseLog.innerHTML = state.log
+  const query = els.responseLogSearch.value.trim();
+  const entries = state.log.filter((entry) => {
+    if (!query) {
+      return true;
+    }
+    return responseJsonForLog(entry).toLowerCase().includes(query.toLowerCase());
+  });
+
+  if (!entries.length) {
+    els.responseLog.innerHTML = query ? '<li class="empty-log">No matching responses</li>' : "";
+    return;
+  }
+
+  els.responseLog.innerHTML = entries
     .map((entry) => {
       const status = entry.response.status;
       const message = status === "ok" ? `tick ${entry.response.payload?.tick ?? "-"}` : entry.response.payload?.message;
+      const responseJson = responseJsonForLog(entry);
       return `
-        <li>
+        <li value="${entry.index}">
           <span class="${status === "ok" ? "ok" : "error"}">${escapeHtml(status)}</span>
           <span>${escapeHtml(String(message || ""))}</span>
-          <code>${escapeHtml(JSON.stringify(entry.command))}</code>
+          <code>${highlightSearch(responseJson, query)}</code>
         </li>
       `;
     })
     .join("");
+
+  if (!query) {
+    requestAnimationFrame(() => {
+      els.responseLog.scrollTop = els.responseLog.scrollHeight;
+    });
+  }
+}
+
+function responseJsonForLog(entry) {
+  return JSON.stringify(entry.response);
+}
+
+function highlightSearch(value, query) {
+  if (!query) {
+    return escapeHtml(value);
+  }
+
+  const text = String(value);
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  let html = "";
+  let cursor = 0;
+  let index = lowerText.indexOf(lowerQuery, cursor);
+
+  while (index !== -1) {
+    html += escapeHtml(text.slice(cursor, index));
+    html += `<mark class="search-hit">${escapeHtml(text.slice(index, index + query.length))}</mark>`;
+    cursor = index + query.length;
+    index = lowerText.indexOf(lowerQuery, cursor);
+  }
+
+  html += escapeHtml(text.slice(cursor));
+  return html;
 }
 
 function updateGeneratedCommand() {
@@ -828,7 +881,7 @@ function latestTick() {
 
 function cycleSideSelection(direction) {
   const world = visibleState();
-  if (!world) {
+  if (!world || state.sideView === "commands") {
     return;
   }
 
@@ -928,6 +981,7 @@ function setSideView(view) {
   }
   document.querySelector("#vessels-view").classList.toggle("hidden", view !== "vessels");
   document.querySelector("#docks-view").classList.toggle("hidden", view !== "docks");
+  els.commandsView.classList.toggle("hidden", view !== "commands");
 }
 
 function selectVessel(id, options = {}) {
