@@ -34,9 +34,14 @@
             </div>
           </div>
           <svg id="world-map" viewBox="0 0 900 520" role="img" aria-label="fleet world map"></svg>
+          <div class="map-controls" aria-label="map zoom controls">
+            <button id="map-zoom-in-button" aria-label="zoom in" title="Zoom in" type="button">+</button>
+            <button id="map-zoom-out-button" aria-label="zoom out" title="Zoom out" type="button">-</button>
+          </div>
         </section>
 
         <aside class="side-panel" aria-label="vessels and docks">
+          <div class="side-panel-resizer" id="side-panel-resizer" title="Resize side panel"></div>
           <div class="side-switcher">
             <div class="side-tabs" role="tablist" aria-label="right panel view">
               <button class="side-tab active" data-side-view="vessels" type="button">Vessels</button>

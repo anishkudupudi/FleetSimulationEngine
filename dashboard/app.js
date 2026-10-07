@@ -39,6 +39,9 @@ const els = {
   builderTick: document.querySelector("#builder-tick-input"),
   commandFields: document.querySelectorAll(".command-field"),
   terminalResizer: document.querySelector("#terminal-resizer"),
+  sidePanelResizer: document.querySelector("#side-panel-resizer"),
+  mapZoomIn: document.querySelector("#map-zoom-in-button"),
+  mapZoomOut: document.querySelector("#map-zoom-out-button"),
 };
 
 document.querySelector("#run-command-button").addEventListener("click", () => {
@@ -149,6 +152,27 @@ els.terminalResizer.addEventListener("pointerdown", (event) => {
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", stop);
 });
+
+els.sidePanelResizer.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--side-panel-width"), 10) || 360;
+
+  const move = (moveEvent) => {
+    const nextWidth = clamp(startWidth + startX - moveEvent.clientX, 260, 640);
+    document.documentElement.style.setProperty("--side-panel-width", `${nextWidth}px`);
+  };
+  const stop = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", stop);
+  };
+
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", stop);
+});
+
+els.mapZoomIn.addEventListener("click", () => zoomMapAt(mapCenter(), 0.82));
+els.mapZoomOut.addEventListener("click", () => zoomMapAt(mapCenter(), 1.18));
 
 els.map.addEventListener("click", (event) => {
   if (state.suppressMapClick) {
@@ -852,6 +876,10 @@ function applyMapViewBox() {
 function zoomMap(event) {
   const pointer = mapPointFromEvent(event);
   const factor = event.deltaY < 0 ? 0.88 : 1.14;
+  zoomMapAt(pointer, factor);
+}
+
+function zoomMapAt(pointer, factor) {
   const nextWidth = clamp(state.mapView.width * factor, 220, 1600);
   const nextHeight = nextWidth * (520 / 900);
   const ratioX = (pointer.x - state.mapView.x) / state.mapView.width;
@@ -864,6 +892,13 @@ function zoomMap(event) {
     height: nextHeight,
   };
   applyMapViewBox();
+}
+
+function mapCenter() {
+  return {
+    x: state.mapView.x + state.mapView.width / 2,
+    y: state.mapView.y + state.mapView.height / 2,
+  };
 }
 
 function mapPointFromEvent(event) {
